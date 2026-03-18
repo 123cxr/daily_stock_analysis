@@ -126,9 +126,23 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 {"key": "LITELLM_MODEL", "value": "gemini/gemini-2.5-flash"},
             ]
         )
-
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["issues"], [])
+
+    def test_get_config_preserves_labeled_select_options_and_enum_validation(self) -> None:
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        agent_arch_schema = items["AGENT_ARCH"]["schema"]
+        self.assertEqual(agent_arch_schema["options"][0]["value"], "single")
+        self.assertEqual(agent_arch_schema["options"][1]["label"], "Multi Agent (Orchestrator)")
+        self.assertEqual(agent_arch_schema["validation"]["enum"], ["single", "multi"])
+
+    def test_validate_reports_invalid_select_option(self) -> None:
+        validation = self.service.validate(items=[{"key": "AGENT_ARCH", "value": "invalid-mode"}])
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any(issue["code"] == "invalid_enum" for issue in validation["issues"]))
 
     @patch.object(
         Config,
@@ -214,8 +228,11 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["resolved_protocol"], "openai")
         self.assertEqual(payload["resolved_model"], "openai/deepseek-chat")
 
-    @patch("src.search_service.reset_search_service")
-    def test_update_with_reload_resets_search_service_singleton(self, mock_reset_search_service) -> None:
+    @patch.object(SystemConfigService, "_reload_runtime_singletons")
+    def test_update_with_reload_resets_runtime_singletons(
+        self,
+        mock_reload_runtime_singletons,
+    ) -> None:
         response = self.service.update(
             config_version=self.manager.get_config_version(),
             items=[{"key": "STOCK_LIST", "value": "600519"}],
@@ -223,7 +240,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         )
 
         self.assertTrue(response["success"])
-        mock_reset_search_service.assert_called_once()
+        mock_reload_runtime_singletons.assert_called_once()
 
     def test_update_raises_conflict_for_stale_version(self) -> None:
         with self.assertRaises(ConfigConflictError):
@@ -232,6 +249,33 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 items=[{"key": "STOCK_LIST", "value": "600519"}],
                 reload_now=False,
             )
+
+    def test_update_appends_news_window_explainability_warning(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "NEWS_STRATEGY_PROFILE", "value": "ultra_short"},
+                {"key": "NEWS_MAX_AGE_DAYS", "value": "7"},
+            ],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        joined = " | ".join(response["warnings"])
+        self.assertIn("effective_days=1", joined)
+        self.assertIn("min(profile_days, NEWS_MAX_AGE_DAYS)", joined)
+
+    def test_update_appends_max_workers_warning(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[{"key": "MAX_WORKERS", "value": "1"}],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        joined = " | ".join(response["warnings"])
+        self.assertIn("MAX_WORKERS=1", joined)
+        self.assertIn("reload_now=false", joined)
 
 
     def test_validate_rejects_comma_only_api_key(self) -> None:
